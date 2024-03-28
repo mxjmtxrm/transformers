@@ -1051,10 +1051,8 @@ _import_structure = {
     ],
     "tools": [
         "Agent",
-        "AzureOpenAiAgent",
-        "HfAgent",
-        "LocalAgent",
-        "OpenAiAgent",
+        "ReactAgent",
+        "CodeAgent",
         "PipelineTool",
         "RemoteTool",
         "Tool",
@@ -5997,10 +5995,8 @@ if TYPE_CHECKING:
     # Tools
     from .tools import (
         Agent,
-        AzureOpenAiAgent,
-        HfAgent,
-        LocalAgent,
-        OpenAiAgent,
+        CodeAgent,
+        ReactAgent,
         PipelineTool,
         RemoteTool,
         Tool,
