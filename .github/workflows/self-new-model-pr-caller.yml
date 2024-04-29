@@ -35,7 +35,7 @@ jobs:
             echo "${{ github.event.head_commit.message }}"
             echo "commit_message=$(git show -s --format=%s)" >> $GITHUB_ENV
 
-        # TODO: change file name and implement commit message logic
+        # TODO: change the file name and implement commit message logic in the script
         - name: Get models to run slow CI
           run: |
             python -m pip install GitPython
