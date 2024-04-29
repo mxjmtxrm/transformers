@@ -39,7 +39,8 @@ jobs:
         - name: Get models to run slow CI
           run: |
             python -m pip install GitPython
-            echo "models=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_ENV
+            python utils/check_if_new_model_added.py | tee output.txt
+            echo "models=$(tail -n 1 output.txt)" >> $GITHUB_ENV
 
         - name: Models to run slow CI
           id: models_to_run
