@@ -38,8 +38,7 @@ jobs:
         - name: Check commit message
           run: |
             echo "${{ github.event.head_commit.message }}"
-            git log -n 5
-            git show -s --format=%s
+            echo "commit_message=$(git show -s --format=%s)" >> $GITHUB_ENV
 
         # TODO: get this value from the commit message
         - name: Check if there are specified models
@@ -50,6 +49,7 @@ jobs:
           id: models_to_run
           run: |
             echo "${{ env.new_model }}"
+            echo "${{ env.commit_message }}"
             echo "${{ env.models }}"
             echo "models=${{ env.models }}" >> $GITHUB_OUTPUT
 
