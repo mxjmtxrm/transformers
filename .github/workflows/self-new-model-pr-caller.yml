@@ -55,7 +55,7 @@ jobs:
 
   dummy:
       runs-on: ubuntu-22.04
-      name: Check specified models to test
+      name: Check specified models to test 3333
       needs: find_models_to_run
       steps:
         - name: Check if there are specified models
