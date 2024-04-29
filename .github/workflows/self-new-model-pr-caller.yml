@@ -40,7 +40,7 @@ jobs:
       runs-on: ubuntu-22.04
       name: Check specified models to test
       outputs:
-        new_model: ${{ steps.check_models.outputs.models }}
+        models: ${{ steps.check_models.outputs.models }}
       steps:
         - uses: actions/checkout@v4
           with:
