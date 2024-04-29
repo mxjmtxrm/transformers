@@ -21,9 +21,9 @@ jobs:
   find_models_to_run:
       runs-on: ubuntu-22.04
       name: Find models to run slow tests
-      if: contains(github.event.pull_request.labels.*.name, 'single-model-run-slow')
+      if: ${{ contains(github.event.pull_request.labels.*.name, 'run-slow') }}
       outputs:
-        new_model: ${{ steps.check_new_model.outputs.new_model }}
+        models: ${{ steps.models_to_run.outputs.models }}
       steps:
         - uses: actions/checkout@v4
           with:
@@ -47,21 +47,21 @@ jobs:
             echo "models=['models/bert', 'models/gpt2']" >> $GITHUB_ENV
 
         - name: Check values
+          id: models_to_run
           run: |
             echo "${{ env.new_model }}"
             echo "${{ env.models }}"
-#            echo "new_model=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_OUTPUT
+            echo "models=${{ env.models }}" >> $GITHUB_OUTPUT
 
-#  # TODO: we want to get the combined value
-#  dummy:
-#      runs-on: ubuntu-22.04
-#      name: Check specified models to test
-#      # TODO: one of them could be
-#      needs: check_specified_models
-#      steps:
-#        - name: Check if there are specified models
-#          run: |
-#            echo "${{ needs.check_specified_models.outputs.models }}"
+  dummy:
+      runs-on: ubuntu-22.04
+      name: Check specified models to test
+      needs: find_models_to_run
+      steps:
+        - name: Check if there are specified models
+          run: |
+            echo "${{ needs.find_models_to_run.outputs.models }}"
+
 #
 #  run_models_gpu:
 #      name: Run all tests for the new model
