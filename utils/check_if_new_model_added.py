@@ -97,7 +97,8 @@ def get_new_model():
 
 
 def get_models_from_commit_message(commit_message):
-    return ["models/bert", "models/gpt2"]
+    return []
+    # return ["models/bert", "models/gpt2"]
 
 
 if __name__ == "__main__":
@@ -105,6 +106,4 @@ if __name__ == "__main__":
     new_model = get_new_model()
     specified_models = get_models_from_commit_message("")
     models = ([] if new_model == "" else [new_model]) + specified_models
-    if len(models) == 0:
-         models = ["dummy"]
     print(models)
