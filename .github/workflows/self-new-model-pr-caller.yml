@@ -18,9 +18,9 @@ env:
   CUDA_VISIBLE_DEVICES: 0,1
 
 jobs:
-  check_for_new_model:
+  find_models_to_run:
       runs-on: ubuntu-22.04
-      name: Check if a PR is a new model PR
+      name: Find models to run slow tests
       if: contains(github.event.pull_request.labels.*.name, 'single-model-run-slow')
       outputs:
         new_model: ${{ steps.check_new_model.outputs.new_model }}
@@ -31,48 +31,37 @@ jobs:
             ref: ${{ github.event.pull_request.head.sha }}
 
         - name: Check if there is a new model
-          id: check_new_model
           run: |
             python -m pip install GitPython
-            echo "new_model=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_OUTPUT
-
-  check_specified_models:
-      runs-on: ubuntu-22.04
-      name: Check specified models to test
-      outputs:
-        models: ${{ steps.check_models.outputs.models }}
-      steps:
-        - uses: actions/checkout@v4
-          with:
-            fetch-depth: "0"
-            ref: ${{ github.event.pull_request.head.sha }}
+            echo "new_model=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_ENV
 
         - name: Check commit message
-          id: check_message
           run: |
             echo "${{ github.event.head_commit.message }}"
             git log -n 5
             git show -s --format=%s
 
+        # TODO: get this value from the commit message
         - name: Check if there are specified models
-          id: check_models
           run: |
-            echo "models=['models/bert', 'models/gpt2']" >> $GITHUB_OUTPUT
+            echo "models=['models/bert', 'models/gpt2']" >> $GITHUB_ENV
 
-#        - name: Check if there are specified models
-#          id: check_models
-#          run: |
-#            python -m pip install GitPython
+        - name: Check values
+          run: |
+            echo "${{ env.new_model }}"
+            echo "${{ env.models }}"
 #            echo "new_model=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_OUTPUT
 
-  dummy:
-      runs-on: ubuntu-22.04
-      name: Check specified models to test
-      needs: check_specified_models
-      steps:
-        - name: Check if there are specified models
-          run: |
-            echo "${{ needs.check_specified_models.outputs.models }}"
+#  # TODO: we want to get the combined value
+#  dummy:
+#      runs-on: ubuntu-22.04
+#      name: Check specified models to test
+#      # TODO: one of them could be
+#      needs: check_specified_models
+#      steps:
+#        - name: Check if there are specified models
+#          run: |
+#            echo "${{ needs.check_specified_models.outputs.models }}"
 #
 #  run_models_gpu:
 #      name: Run all tests for the new model
