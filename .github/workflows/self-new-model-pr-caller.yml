@@ -67,7 +67,7 @@ jobs:
       runs-on: ubuntu-22.04
       name: Check specified models to test 3
       needs: find_models_to_run
-      if: ${{ needs.find_models_to_run.outputs.models) != '[]' }}
+      if: ${{ needs.find_models_to_run.outputs.models != '[]' }}
       steps:
         - name: Check if there are specified models
           run: |
