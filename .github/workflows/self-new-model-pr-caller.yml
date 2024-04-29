@@ -44,12 +44,14 @@ jobs:
         - name: Check if there are specified models
           run: |
             echo "models=['models/bert', 'models/gpt2']" >> $GITHUB_ENV
+            echo "models=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_ENV
 
-        - name: Check values
+        # TODO: combine the values
+        - name: Models to run slow CI
           id: models_to_run
           run: |
-            echo "${{ env.new_model }}"
             echo "${{ env.commit_message }}"
+            echo "${{ env.new_model }}"
             echo "${{ env.models }}"
             echo "models=${{ env.models }}" >> $GITHUB_OUTPUT
 
