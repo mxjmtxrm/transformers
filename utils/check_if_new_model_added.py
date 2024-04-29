@@ -97,8 +97,8 @@ def get_new_model():
 
 
 def get_models_from_commit_message(commit_message):
-    return []
-    # return ["models/bert", "models/gpt2"]
+    # return []
+    return ["models/bert", "models/gpt2"]
 
 
 if __name__ == "__main__":
