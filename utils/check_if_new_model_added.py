@@ -82,7 +82,7 @@ def get_new_python_files() -> List[str]:
     return get_new_python_files_between_commits(repo.head.commit, branching_commits)
 
 
-if __name__ == "__main__":
+def get_new_model():
     new_files = get_new_python_files()
     reg = re.compile(r"src/transformers/(models/.*)/modeling_.*\.py")
 
@@ -93,4 +93,18 @@ if __name__ == "__main__":
             new_model = find_new_model[0]
             # It's unlikely we have 2 new modeling files in a pull request.
             break
-    print(new_model)
+    return new_model
+
+
+def get_models_from_commit_message(commit_message):
+    return ["models/bert", "models/gpt2"]
+
+
+if __name__ == "__main__":
+
+    new_model = get_new_model()
+    specified_models = get_models_from_commit_message("")
+    models = ([] if new_model == "" else [new_model]) + specified_models
+    if len(models) == 0:
+         models = ["dummy"]
+    print(models)

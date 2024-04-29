@@ -43,7 +43,6 @@ jobs:
         # TODO: get this value from the commit message
         - name: Check if there are specified models
           run: |
-            echo "models=['models/bert', 'models/gpt2']" >> $GITHUB_ENV
             echo "models=$(python utils/check_if_new_model_added.py | tail -n 1)" >> $GITHUB_ENV
 
         # TODO: combine the values
@@ -59,6 +58,16 @@ jobs:
       runs-on: ubuntu-22.04
       name: Check specified models to test 3333444444
       needs: find_models_to_run
+      steps:
+        - name: Check if there are specified models
+          run: |
+            echo "${{ needs.find_models_to_run.outputs.models }}"
+
+  dummy2:
+      runs-on: ubuntu-22.04
+      name: Check specified models to test 3333444444
+      needs: find_models_to_run
+      if: contains(fromJson(needs.find_models_to_run.outputs.matrix), 'dummy') != true
       steps:
         - name: Check if there are specified models
           run: |
