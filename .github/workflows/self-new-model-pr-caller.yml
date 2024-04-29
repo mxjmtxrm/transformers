@@ -65,9 +65,9 @@ jobs:
 
   dummy2:
       runs-on: ubuntu-22.04
-      name: Check specified models to test 3333444444
+      name: Check specified models to test 3
       needs: find_models_to_run
-      if: contains(fromJson(needs.find_models_to_run.outputs.matrix), 'dummy') != true
+      if: contains(fromJson(needs.find_models_to_run.outputs.models), 'dummy') != true
       steps:
         - name: Check if there are specified models
           run: |
