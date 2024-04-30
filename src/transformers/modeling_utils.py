@@ -890,11 +890,14 @@ def _load_state_dict_into_meta_model(
             # For quantized modules with FSDP/DeepSpeed Stage 3, we need to quantize the parameter on the GPU
             # and then cast it to CPU to avoid excessive memory usage on each GPU
             # in comparison to the sharded model across GPUs.
-            if is_fsdp_enabled() or is_deepspeed_zero3_enabled():
-                module, tensor_name = get_module_from_name(model, param_name)
-                value = getattr(module, tensor_name)
-                value = type(value)(value.data.to("cpu"), **value.__dict__)
-                setattr(module, tensor_name, value)
+
+            # TODO: fixed by yangshangtong
+            # if is_fsdp_enabled() or is_deepspeed_zero3_enabled():
+            #     module, tensor_name = get_module_from_name(model, param_name)
+            #     value = getattr(module, tensor_name)
+            #     value = type(value)(value.data.to("cpu"), **value.__dict__)
+            #     setattr(module, tensor_name, value)
+
             # TODO: consider removing used param_parts from state_dict before return
 
     return error_msgs, offload_index, state_dict_index
