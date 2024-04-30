@@ -510,6 +510,14 @@ class Trainer:
         self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
 
+        self.dist_device = "cuda" if self.args.distributed_state.backend == "nccl" else "cpu"
+        special_tokens = []
+        if hasattr(self.tokenizer, "special_tokens"):
+            special_tokens += list(self.tokenizer.special_tokens.values())
+        if hasattr(self.tokenizer, "tokenizer_special_tokens"):
+            special_tokens += list(self.tokenizer.tokenizer_special_tokens.values())
+        self.special_tokens = torch.tensor(list(set(special_tokens)))
+
         # Bnb Quantized models doesn't support `.to` operation.
         if (
             self.place_model_on_device
@@ -2177,11 +2185,14 @@ class Trainer:
                             "a `main_input_name` attribute to the model class you are using."
                         )
                     else:
-                        input_device = inputs[main_input_name].device
+                        # (LS) Hotfix from https://github.com/huggingface/transformers/issues/28791
+                        inputs_device = inputs[main_input_name].device
                         self.state.num_input_tokens_seen += torch.sum(
-                            self.accelerator.gather(
-                                torch.tensor(inputs[main_input_name].numel(), device=input_device, dtype=torch.int64)
-                            )
+                            self.accelerator.gather(torch.tensor(
+                                # minus two newline tokens from prompt: `<|user|>\n{input}<|assistant|>\n{target}`
+                                torch.sum(~torch.isin(inputs[main_input_name], self.special_tokens.to(inputs_device))).item() - torch.count_nonzero(inputs[main_input_name] == self.tokenizer.get_prefix_tokens()[0]).item() * 2,
+                                device=self.dist_device, dtype=torch.int64
+                            ))
                         ).item()
                 if rng_to_sync:
                     self._load_rng_state(resume_from_checkpoint)

@@ -94,6 +94,8 @@ class LlamaConfig(PretrainedConfig):
             these scaling strategies behave:
             https://www.reddit.com/r/LocalLLaMA/comments/14mrgpr/dynamically_scaled_rope_further_increases/. This is an
             experimental feature, subject to breaking API changes in future versions.
+        rope_dim (`int`, *optional*, defaults to `None`):
+            Dimension of heads to apply Rotary Position Embedding. If `None`, defaults to `hidden_size // num_attention_heads`.
         attention_bias (`bool`, *optional*, defaults to `False`):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
@@ -137,6 +139,7 @@ class LlamaConfig(PretrainedConfig):
         tie_word_embeddings=False,
         rope_theta=10000.0,
         rope_scaling=None,
+        rope_dim=None,
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
@@ -152,6 +155,8 @@ class LlamaConfig(PretrainedConfig):
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
+        if rope_dim is None:
+            rope_dim = hidden_size // num_attention_heads
 
         self.num_key_value_heads = num_key_value_heads
         self.hidden_act = hidden_act
@@ -162,6 +167,7 @@ class LlamaConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
         self._rope_scaling_validation()
+        self.rope_dim = rope_dim
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
