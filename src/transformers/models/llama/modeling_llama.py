@@ -78,6 +78,7 @@ class LlamaRMSNorm(nn.Module):
         """
         LlamaRMSNorm is equivalent to T5LayerNorm
         """
+        self.hidden_size = hidden_size
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
