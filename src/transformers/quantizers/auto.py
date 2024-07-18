@@ -30,6 +30,7 @@ from .quantizer_aqlm import AqlmHfQuantizer
 from .quantizer_awq import AwqQuantizer
 from .quantizer_bnb_4bit import Bnb4BitHfQuantizer
 from .quantizer_bnb_8bit import Bnb8BitHfQuantizer
+from .quantizer_tgi_bit import TGIBitHfQuantizer
 from .quantizer_eetq import EetqHfQuantizer
 from .quantizer_gptq import GptqHfQuantizer
 from .quantizer_hqq import HqqHfQuantizer
@@ -40,6 +41,7 @@ AUTO_QUANTIZER_MAPPING = {
     "awq": AwqQuantizer,
     "bitsandbytes_4bit": Bnb4BitHfQuantizer,
     "bitsandbytes_8bit": Bnb8BitHfQuantizer,
+    "tgi": TGIBitHfQuantizer,
     "gptq": GptqHfQuantizer,
     "aqlm": AqlmHfQuantizer,
     "quanto": QuantoHfQuantizer,

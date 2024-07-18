@@ -30,6 +30,11 @@ _import_structure = {
         "set_module_8bit_tensor_to_device",
         "set_module_quantized_tensor_to_device",
     ],
+    "tgi": [
+        "WeightOnlyQuantize",
+        "replace_with_tgi_linear",
+        "tgi_quantize"
+    ],
     "deepspeed": [
         "HfDeepSpeedConfig",
         "HfTrainerDeepSpeedConfig",

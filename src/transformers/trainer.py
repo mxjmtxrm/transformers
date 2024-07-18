@@ -522,6 +522,7 @@ class Trainer:
         if (
             self.place_model_on_device
             and not getattr(model, "quantization_method", None) == QuantizationMethod.BITS_AND_BYTES
+            and not getattr(model, "quantization_method", None) == QuantizationMethod.TGI
         ):
             self._move_model_to_device(model, args.device)
 

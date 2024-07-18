@@ -98,7 +98,7 @@ from .utils.import_utils import (
     is_torch_fx_proxy,
     is_torchdynamo_compiling,
 )
-from .utils.quantization_config import BitsAndBytesConfig, QuantizationMethod
+from .utils.quantization_config import BitsAndBytesConfig, QuantizationMethod, TGIQuantizationConfig
 
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
@@ -2664,6 +2664,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
     def cuda(self, *args, **kwargs):
         if getattr(self, "quantization_method", None) == QuantizationMethod.HQQ:
             raise ValueError("`.cuda` is not supported for HQQ-quantized models.")
+        if getattr(self, "quantization_method", None) == QuantizationMethod.TGI:
+            raise ValueError("`.cuda` is not supported for TGI-quantized models.")
         # Checks if the model has been loaded in 8-bit
         if getattr(self, "quantization_method", None) == QuantizationMethod.BITS_AND_BYTES:
             raise ValueError(
@@ -2677,6 +2679,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
     def to(self, *args, **kwargs):
         if getattr(self, "quantization_method", None) == QuantizationMethod.HQQ:
             raise ValueError("`.to` is not supported for HQQ-quantized models.")
+        if getattr(self, "quantization_method", None) == QuantizationMethod.TGI:
+            raise ValueError("`.to` is not supported for TGI-quantized models.")
         # Checks if the model has been loaded in 8-bit
         if getattr(self, "quantization_method", None) == QuantizationMethod.BITS_AND_BYTES:
             raise ValueError(
@@ -2988,6 +2992,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         offload_buffers = kwargs.pop("offload_buffers", False)
         load_in_8bit = kwargs.pop("load_in_8bit", False)
         load_in_4bit = kwargs.pop("load_in_4bit", False)
+        load_in_tgi_4bit = kwargs.pop("load_in_tgi_4bit", False)
+        load_in_tgi_8bit = kwargs.pop("load_in_tgi_8bit", False)
         quantization_config = kwargs.pop("quantization_config", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
@@ -3116,6 +3122,24 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             logger.warning(
                 "The `load_in_4bit` and `load_in_8bit` arguments are deprecated and will be removed in the future versions. "
                 "Please, pass a `BitsAndBytesConfig` object in `quantization_config` argument instead."
+            )
+
+        if load_in_tgi_4bit or load_in_tgi_8bit:
+            if quantization_config is not None:
+                raise ValueError(
+                    "You can't pass `load_in_4bit`or `load_in_8bit` as a kwarg when passing "
+                    "`quantization_config` argument at the same time."
+                )
+
+            # preparing TGIQuantizationConfig from kwargs
+            config_dict = {k: v for k, v in kwargs.items() if k in inspect.signature(TGIQuantizationConfig).parameters}
+            config_dict = {**config_dict, "load_in_tgi_4bit": load_in_tgi_4bit, "load_in_tgi_8bit": load_in_tgi_8bit}
+            quantization_config, kwargs = TGIQuantizationConfig.from_dict(
+                config_dict=config_dict, return_unused_kwargs=True, **kwargs
+            )
+            logger.warning(
+                "The `load_in_tgi_4bit` and `load_in_tgi_8bit` arguments are deprecated and will be removed in the future versions. "
+                "Please, pass a `TGIQuantizationConfig` object in `quantization_config` argument instead."
             )
 
         from_pt = not (from_tf | from_flax)
@@ -3750,7 +3774,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             if (
                 "force_hooks" in inspect.signature(dispatch_model).parameters
                 and hf_quantizer is not None
-                and hf_quantizer.quantization_config.quant_method == QuantizationMethod.HQQ
+                and (hf_quantizer.quantization_config.quant_method == QuantizationMethod.HQQ
+                or hf_quantizer.quantization_config.quant_method == QuantizationMethod.TGI)
             ):
                 device_map_kwargs["force_hooks"] = True
             if not is_fsdp_enabled() and not is_deepspeed_zero3_enabled():
