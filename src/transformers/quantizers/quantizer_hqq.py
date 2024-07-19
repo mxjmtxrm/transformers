@@ -101,7 +101,8 @@ class HqqHfQuantizer(HfQuantizer):
     ) -> bool:
         module, tensor_name = get_module_from_name(model, param_name)
 
-        return isinstance(module, torch.nn.Linear)
+        # FIX(yst): fixed a bug adding "tensor_name == weight"
+        return isinstance(module, torch.nn.Linear) and (tensor_name == "weight")
 
     def create_quantized_param(
         self,
@@ -138,6 +139,12 @@ class HqqHfQuantizer(HfQuantizer):
         # directly doesn't work.
 
         if hasattr(module, "quant_config"):
+            # FIX(yst): put module on GPU to accelerate the quantization while using zero3
+            current_gpu = torch.cuda.current_device()
+            module = module.to(current_gpu)
+            target_device = f"cuda:{current_gpu}"
+            # -- end
+
             hqq_layer = HQQLinear(
                 module,
                 module.quant_config,
@@ -145,7 +152,6 @@ class HqqHfQuantizer(HfQuantizer):
                 device=target_device,
                 del_orig=True,
             )
-
             if hqq_layer.bias is not None and isinstance(hqq_layer.bias, torch.Tensor):
                 hqq_layer.bias = torch.nn.Parameter(hqq_layer.bias)
 
