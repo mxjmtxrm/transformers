@@ -22,14 +22,12 @@ from .quantizers_utils import get_module_from_name
 if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
 
-from ..utils import is_accelerate_available, is_bitsandbytes_available, is_torch_available, logging
+from ..utils import is_torch_available, logging
 from ..integrations import get_keys_to_not_convert, replace_with_tgi_linear, WeightOnlyQuantize, tgi_quantize
 
 
 if is_torch_available():
     import torch
-
-    from ..pytorch_utils import Conv1D
 
 logger = logging.get_logger(__name__)
 
@@ -275,5 +273,5 @@ class TGIBitHfQuantizer(HfQuantizer):
 
 if __name__ == "__main__":
     from transformers import AutoModelForCausalLM
-    model_4bit = AutoModelForCausalLM.from_pretrained("bigscience/bloom-1b7", load_in_4bit=True, device_map="auto")
+    model_4bit = AutoModelForCausalLM.from_pretrained("bigscience/bloom-1b7", load_in_tgi_4bit=True)
     print(model_4bit)

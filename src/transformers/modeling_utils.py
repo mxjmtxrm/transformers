@@ -892,11 +892,10 @@ def _load_state_dict_into_meta_model(
             # in comparison to the sharded model across GPUs.
 
             # TODO: fixed by yangshangtong
-            # if is_fsdp_enabled() or is_deepspeed_zero3_enabled():
-            #     module, tensor_name = get_module_from_name(model, param_name)
-            #     value = getattr(module, tensor_name)
-            #     value = type(value)(value.data.to("cpu"), **value.__dict__)
-            #     setattr(module, tensor_name, value)
+            if is_fsdp_enabled() or is_deepspeed_zero3_enabled():
+                module, tensor_name = get_module_from_name(model, param_name)
+                value = getattr(module, tensor_name)
+                value = type(value)(value.data.to("cpu"), requires_grad=False)
 
             # TODO: consider removing used param_parts from state_dict before return
 

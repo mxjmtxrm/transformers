@@ -5,19 +5,17 @@ from inspect import signature
 
 from packaging import version
 
-from ..utils import is_accelerate_available, is_bitsandbytes_available, logging
+from ..utils import is_accelerate_available, is_tgi_available, logging
 from glm_kernel import (
     weight_only_quant_ops,
     fused_gemm_ops
 )
 from typing import Tuple
 
-if is_bitsandbytes_available():
-    import bitsandbytes as bnb
+if is_tgi_available():
     import torch
     import torch.nn as nn
 
-    from ..pytorch_utils import Conv1D
 
 if is_accelerate_available():
     from accelerate import init_empty_weights

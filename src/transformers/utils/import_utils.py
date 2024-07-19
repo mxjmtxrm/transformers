@@ -740,6 +740,9 @@ def is_torch_xpu_available(check_device=False):
             return False
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
+@lru_cache
+def is_tgi_available() -> bool:
+    return importlib.util.find_spec("glm_kernel") is not None
 
 def is_bitsandbytes_available():
     if not is_torch_available():

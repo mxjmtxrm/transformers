@@ -526,9 +526,6 @@ class TGIQuantizationConfig(QuantizationConfigMixin):
 
     This replaces `load_in_tgi_8bit` or `load_in_tgi_4bit`therefore both options are mutually exclusive.
 
-    Currently only supports `LLM.int8()`, `FP4`, and `NF4` quantization. If more methods are added to `bitsandbytes`,
-    then more arguments will be added to this class.
-
     Args:
         load_in_tgi_8bit (`bool`, *optional*, defaults to `False`):
             This flag is used to enable 8-bit quantization with LLM.int8().
@@ -553,20 +550,6 @@ class TGIQuantizationConfig(QuantizationConfigMixin):
             your model in different parts and run some parts in int8 on GPU and some parts in fp32 on CPU, you can use
             this flag. This is useful for offloading large models such as `google/flan-t5-xxl`. Note that the int8
             operations will not be run on CPU.
-        llm_int8_has_fp16_weight (`bool`, *optional*, defaults to `False`):
-            This flag runs LLM.int8() with 16-bit main weights. This is useful for fine-tuning as the weights do not
-            have to be converted back and forth for the backward pass.
-        bnb_4bit_compute_dtype (`torch.dtype` or str, *optional*, defaults to `torch.float32`):
-            This sets the computational type which might be different than the input type. For example, inputs might be
-            fp32, but computation can be set to bf16 for speedups.
-        bnb_4bit_quant_type (`str`,  *optional*, defaults to `"fp4"`):
-            This sets the quantization data type in the bnb.nn.Linear4Bit layers. Options are FP4 and NF4 data types
-            which are specified by `fp4` or `nf4`.
-        bnb_4bit_use_double_quant (`bool`, *optional*, defaults to `False`):
-            This flag is used for nested quantization where the quantization constants from the first quantization are
-            quantized again.
-        bnb_4bit_quant_storage (`torch.dtype` or str, *optional*, defaults to `torch.uint8`):
-            This sets the storage type to pack the quanitzed 4-bit prarams.
         kwargs (`Dict[str, Any]`, *optional*):
             Additional parameters from which to initialize the configuration object.
     """
@@ -577,14 +560,8 @@ class TGIQuantizationConfig(QuantizationConfigMixin):
         load_in_tgi_4bit=False,
         group_size=None,
         has_zeros=False,
-        llm_int8_threshold=6.0,
         llm_int8_skip_modules=None,
         llm_int8_enable_fp32_cpu_offload=False,
-        llm_int8_has_fp16_weight=False,
-        bnb_4bit_compute_dtype=None,
-        bnb_4bit_quant_type="fp4",
-        bnb_4bit_use_double_quant=False,
-        bnb_4bit_quant_storage=None,
         fp8_activation=False,
         **kwargs,
     ):
@@ -597,31 +574,9 @@ class TGIQuantizationConfig(QuantizationConfigMixin):
         self._load_in_tgi_4bit = load_in_tgi_4bit
         self.group_size = group_size
         self.has_zeros = has_zeros
-        self.llm_int8_threshold = llm_int8_threshold
         self.llm_int8_skip_modules = llm_int8_skip_modules
         self.llm_int8_enable_fp32_cpu_offload = llm_int8_enable_fp32_cpu_offload
-        self.llm_int8_has_fp16_weight = llm_int8_has_fp16_weight
-        self.bnb_4bit_quant_type = bnb_4bit_quant_type
-        self.bnb_4bit_use_double_quant = bnb_4bit_use_double_quant
         self.fp8_activation = fp8_activation
-
-        if bnb_4bit_compute_dtype is None:
-            self.bnb_4bit_compute_dtype = torch.float32
-        elif isinstance(bnb_4bit_compute_dtype, str):
-            self.bnb_4bit_compute_dtype = getattr(torch, bnb_4bit_compute_dtype)
-        elif isinstance(bnb_4bit_compute_dtype, torch.dtype):
-            self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype
-        else:
-            raise ValueError("bnb_4bit_compute_dtype must be a string or a torch.dtype")
-
-        if bnb_4bit_quant_storage is None:
-            self.bnb_4bit_quant_storage = torch.uint8
-        elif isinstance(bnb_4bit_quant_storage, str):
-            self.bnb_4bit_quant_storage = getattr(torch, bnb_4bit_quant_storage)
-        elif isinstance(bnb_4bit_quant_storage, torch.dtype):
-            self.bnb_4bit_quant_storage = bnb_4bit_quant_storage
-        else:
-            raise ValueError("bnb_4bit_quant_storage must be a string or a torch.dtype")
 
         if kwargs:
             logger.warning(f"Unused kwargs: {list(kwargs.keys())}. These kwargs are not used in {self.__class__}.")
@@ -664,32 +619,10 @@ class TGIQuantizationConfig(QuantizationConfigMixin):
         if not isinstance(self.load_in_tgi_8bit, bool):
             raise ValueError("load_in_tgi_8bit must be a boolean")
 
-        if not isinstance(self.llm_int8_threshold, float):
-            raise ValueError("llm_int8_threshold must be a float")
-
         if self.llm_int8_skip_modules is not None and not isinstance(self.llm_int8_skip_modules, list):
             raise ValueError("llm_int8_skip_modules must be a list of strings")
         if not isinstance(self.llm_int8_enable_fp32_cpu_offload, bool):
             raise ValueError("llm_int8_enable_fp32_cpu_offload must be a boolean")
-
-        if not isinstance(self.llm_int8_has_fp16_weight, bool):
-            raise ValueError("llm_int8_has_fp16_weight must be a boolean")
-
-        if self.bnb_4bit_compute_dtype is not None and not isinstance(self.bnb_4bit_compute_dtype, torch.dtype):
-            raise ValueError("bnb_4bit_compute_dtype must be torch.dtype")
-
-        if not isinstance(self.bnb_4bit_quant_type, str):
-            raise ValueError("bnb_4bit_quant_type must be a string")
-
-        if not isinstance(self.bnb_4bit_use_double_quant, bool):
-            raise ValueError("bnb_4bit_use_double_quant must be a boolean")
-
-        if self.load_in_tgi_4bit and not version.parse(importlib.metadata.version("bitsandbytes")) >= version.parse(
-            "0.39.0"
-        ):
-            raise ValueError(
-                "4 bit quantization requires bitsandbytes>=0.39.0 - please upgrade your bitsandbytes version"
-            )
 
     def is_quantizable(self):
         r"""
@@ -715,8 +648,6 @@ class TGIQuantizationConfig(QuantizationConfigMixin):
             `Dict[str, Any]`: Dictionary of all the attributes that make up this configuration instance.
         """
         output = copy.deepcopy(self.__dict__)
-        output["bnb_4bit_compute_dtype"] = str(output["bnb_4bit_compute_dtype"]).split(".")[1]
-        output["bnb_4bit_quant_storage"] = str(output["bnb_4bit_quant_storage"]).split(".")[1]
         output["load_in_tgi_4bit"] = self.load_in_tgi_4bit
         output["load_in_tgi_8bit"] = self.load_in_tgi_8bit
 
