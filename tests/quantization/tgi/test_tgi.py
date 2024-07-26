@@ -111,13 +111,13 @@ class TGI4BitTest(Base4bitTest):
         memory footprint of the converted model and the class type of the linear layers of the converted models
         """
         # from bitsandbytes.nn import Params4bit
-        from transformers.integrations.tgi import WeightOnlyQuantize
+        from transformers.integrations.tgi import GLMQuantize
         mem_fp16 = self.model_fp16.get_memory_footprint()
         mem_4bit = self.model_4bit.get_memory_footprint()
         print(f"mem_fp16: {mem_fp16} / mem_4bit: {mem_4bit} = {mem_fp16 / mem_4bit}")
         self.assertAlmostEqual(mem_fp16 / mem_4bit, self.EXPECTED_RELATIVE_DIFFERENCE)
         linear = get_some_linear_layer(self.model_4bit)
-        self.assertTrue(isinstance(linear, WeightOnlyQuantize))
+        self.assertTrue(isinstance(linear, GLMQuantize))
 
     def test_original_dtype(self):
         r"""

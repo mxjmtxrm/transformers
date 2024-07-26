@@ -24,11 +24,7 @@ if is_accelerate_available():
 logger = logging.get_logger(__name__)
 
 
-def tgi_quantize(weight :torch.Tensor, weight_bit_width=8,
-                 fp8_activation=False, group_size=None, has_zeros=False) -> Tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
-    a_dtype = 0 if weight.dtype == torch.float16 else 1
-    if fp8_activation:
-        a_dtype = 2
+def glm_quantize(weight :torch.Tensor, weight_bit_width=8, group_size=None, has_zeros=False) -> Tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
     # padding weight last dim to multiple of 64 and group_size
     if weight.shape[-1] % 64 != 0:
         weight = torch.nn.functional.pad(weight, (0, 64 - weight.shape[-1] % 64))
@@ -37,7 +33,7 @@ def tgi_quantize(weight :torch.Tensor, weight_bit_width=8,
 
     quantizated_weight = weight.cpu().to(torch.float32)
     quantizated_weight = quantizated_weight.view(weight.shape[0], -1, weight.shape[-1] if group_size is None else group_size)
-
+    weight_scale, weight_zero, ori_weight_zero = None, None, None
     if not has_zeros:
         weight_scale = quantizated_weight.abs().max(dim=-1).values / (2 ** (weight_bit_width - 1) - 1)
         quantizated_weight = torch.round(quantizated_weight / weight_scale.unsqueeze(-1)).to(torch.int8).view(quantizated_weight.shape[0], -1).t().contiguous().cpu()
@@ -46,14 +42,10 @@ def tgi_quantize(weight :torch.Tensor, weight_bit_width=8,
         quantizated_weight = quantizated_weight - weight_zero.unsqueeze(-1)
         weight_scale = quantizated_weight.max(dim=-1).values / (2 ** weight_bit_width - 1)
         quantizated_weight = torch.round(quantizated_weight / weight_scale.unsqueeze(-1) - 2 ** (weight_bit_width - 1)).to(torch.int8)
-        weight_zero = weight_zero + 2 ** (weight_bit_width - 1) * weight_scale
         quantizated_weight = quantizated_weight.view(quantizated_weight.shape[0], -1).t().contiguous().cpu()
-
     if weight_bit_width == 4:
         quantizated_weight = weight_only_quant_ops.pack_int8_tensor_to_packed_int4(quantizated_weight)
-    quantizated_weight = weight_only_quant_ops.preprocess_weights_for_mixed_gemm(quantizated_weight, weight_bit_width, a_dtype)
     quantizated_weight = torch.nn.Parameter(quantizated_weight.to(weight.device), requires_grad=False)
-
     weight_scale = weight_scale.to(weight.dtype).t().contiguous()
     if group_size is None:
         weight_scale = weight_scale.squeeze(0).contiguous()
@@ -64,41 +56,82 @@ def tgi_quantize(weight :torch.Tensor, weight_bit_width=8,
         weight_zero = torch.nn.Parameter(weight_zero.to(weight.device), requires_grad=False)
     else:
         weight_zero = None
-
     torch.cuda.empty_cache()
     return quantizated_weight, weight_scale, weight_zero
 
-class WeightOnlyQuantize(torch.nn.Module):
+class GLMQuantize(torch.nn.Module):
     def __init__(
         self,
         weight: torch.Tensor,
-        bias: torch.Tensor
+        bias: torch.Tensor,
+        weight_bit_width=4,
+        group_size=None
     ):
         super().__init__()
-        self.weight = torch.nn.Parameter(weight, requires_grad=False)
+        self.weight = torch.nn.Parameter(weight)
         self.weight_scale = torch.nn.Parameter(weight, requires_grad=False)
         self.weight_zero = torch.nn.Parameter(weight, requires_grad=False)
-        self.bias = torch.nn.Parameter(bias.to(weight.device, dtype=self.weight_scale.dtype), requires_grad=False) if bias is not None else None
+        self.bias = torch.nn.Parameter(bias.to(weight.device, dtype=self.weight_scale.dtype)) if bias is not None else None
+        self.weight_bit_width = weight_bit_width
+        self.ori_shape = weight.shape[-1]
+        self.group_size = group_size
         return
 
     def forward(self, x: torch.Tensor):
-        x_shape = x.size()
-        # padding x if x not the same shape as weight
-        if x_shape[-1] != self.weight.size(0):
-            x = torch.nn.functional.pad(x, (0, self.weight.size(0) - x_shape[-1]))
-        x = x.contiguous().view(-1, x.size(-1))
-        if self.weight_scale.dim() == 1:
-            out_features = self.weight_scale.size(0)
-            output = fused_gemm_ops.fused_gemm(x, self.weight, self.weight_scale, self.bias)
-        elif self.weight_zero is None:
-            out_features = self.weight_scale.size(1)
-            group_size = self.weight.shape[0] // self.weight_scale.shape[0]
-            output = fused_gemm_ops.fused_gemm_group(x, self.weight, self.weight_scale, group_size, self.bias)
+        output = GLMMatMulBit.apply(x, self.weight, self.weight_scale, 
+                                    self.weight_zero, self.weight_bit_width, 
+                                    self.ori_shape, self.group_size, self.bias)
+        return output
+
+
+class GLMMatMulBit(torch.autograd.Function):
+    # forward is the same, but we added the fallback for pre-turing GPUs
+    # backward is mostly the same, but adds one extra clause (see "elif state.CxB is not None")
+    @staticmethod
+    def dequantize(weight: torch.Tensor | torch.nn.Parameter, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size=None):
+        if weight_bit_width == 4:
+            weight = weight_only_quant_ops.unpack_int4_packed_tensor_to_int8(weight.detach().cpu())
+        weight = weight.to(weight_scale.dtype).to(weight_scale.device).t().contiguous()
+        if group_size is None:
+            weight_scale = weight_scale.unsqueeze(-1)
         else:
-            out_features = self.weight_scale.size(1)
-            group_size = self.weight.shape[0] // self.weight_scale.shape[0]
-            output = fused_gemm_ops.fused_gemm_group_zero(x, self.weight, self.weight_scale, self.weight_zero, group_size, self.bias)
-        return output.view(*(x_shape[:-1] + (out_features,)))
+            weight = weight.view(weight.shape[0], -1, group_size)
+            weight_scale = weight_scale.t().unsqueeze(-1)
+        if weight_zero is None:
+            weight = weight_scale * weight
+        else:
+            weight = weight_scale * (weight + 2 ** (weight_bit_width - 1))  + weight_zero
+        weight = weight.contiguous().view(weight.shape[0], -1)
+        cur_shape = weight.shape[-1]
+        if cur_shape != ori_shape:
+            weight = torch.nn.functional.pad(weight, (0, ori_shape - cur_shape))
+        weight = torch.nn.Parameter(weight, requires_grad=False)
+        return weight
+    
+    @staticmethod
+    def forward(ctx, x, weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size, bias):
+        ctx.tensors = (weight, weight_scale, weight_zero, bias)
+        ctx.dtype_bias = bias.dtype if bias is not None else None
+        ctx.weight_bit_width = weight_bit_width
+        ctx.ori_shape = ori_shape
+        ctx.group_size = group_size
+        return torch.matmul(x, GLMMatMulBit.dequantize(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size).t())
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        weight, weight_scale, weight_zero, bias = ctx.tensors
+        weight_bit_width = ctx.weight_bit_width
+        ori_shape = ctx.ori_shape
+        group_size = ctx.group_size
+        grad_output = grad_output
+        req_gradX, _, _, _, _, _, _, req_gradBias = ctx.needs_input_grad
+        grad_x, grad_bias = None, None
+        if req_gradBias:
+            grad_bias = grad_output.sum(0, dtype=bias.dtype)
+        if req_gradX:
+            grad_x = torch.matmul(grad_output, GLMMatMulBit.dequantize(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size))
+        # print(f"weight: {GLMMatMulBit.dequantize(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size)},\n grad_x: {grad_x}")
+        return grad_x, None, None, None, None, None, None, grad_bias
 
 
 def _replace_with_tgi_linear(
@@ -114,6 +147,7 @@ def _replace_with_tgi_linear(
     Returns the converted model and a boolean that indicates if the conversion has been successfull or not.
     """
     # model.to(torch.cuda.current_device())
+    weight_bit_width = 4 if quantization_config.load_in_tgi_4bit else 8
     for name, module in model.named_children():
         if current_key_name is None:
             current_key_name = []
@@ -132,9 +166,11 @@ def _replace_with_tgi_linear(
                     ):
                         pass
                     else:
-                        model._modules[name] = WeightOnlyQuantize(
+                        model._modules[name] = GLMQuantize(
                             module.weight,
-                            module.bias
+                            module.bias,
+                            weight_bit_width = weight_bit_width,
+                            group_size=quantization_config.group_size
                         )
                         has_been_replaced = True
                 # Store the module class in case we need to transpose the weight later

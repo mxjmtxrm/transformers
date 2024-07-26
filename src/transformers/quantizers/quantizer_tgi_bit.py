@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
 
 from ..utils import is_torch_available, logging
-from ..integrations import get_keys_to_not_convert, replace_with_tgi_linear, WeightOnlyQuantize, tgi_quantize
+from ..integrations import get_keys_to_not_convert, replace_with_tgi_linear, GLMQuantize, glm_quantize
 
 
 if is_torch_available():
@@ -114,9 +114,11 @@ class TGIBitHfQuantizer(HfQuantizer):
                 The list of missing keys in the checkpoint compared to the state dict of the model
         """
         tmp_missing_keys = missing_keys.copy()
+        ignore_missing_keys = ["weight_scale", "weight_zero", "weight_bit_width", "ori_shape", "group_size"]
         for key in tmp_missing_keys:
-            if "weight_scale" in key or "weight_zero" in key:
-                missing_keys.remove(key)
+            for ignore_missing_key in ignore_missing_keys:
+                if ignore_missing_key in key:
+                    missing_keys.remove(ignore_missing_key)
         return missing_keys
 
     def check_quantized_param(
@@ -128,7 +130,7 @@ class TGIBitHfQuantizer(HfQuantizer):
         **kwargs,
     ) -> bool:
         module, _ = get_module_from_name(model, param_name)
-        if isinstance(module, WeightOnlyQuantize):
+        if isinstance(module, GLMQuantize):
             # Add here check for loaded components' dtypes once serialization is implemented
             return True
         return False
@@ -164,7 +166,7 @@ class TGIBitHfQuantizer(HfQuantizer):
         weight_bit_width = 8
         if self.quantization_config.load_in_tgi_4bit:
             weight_bit_width = 4
-        weight, weight_scale, weight_zero = tgi_quantize(param_value, weight_bit_width, 
+        weight, weight_scale, weight_zero = glm_quantize(param_value, weight_bit_width, 
                                                          self.quantization_config.fp8_activation, 
                                                          self.quantization_config.group_size, 
                                                          self.quantization_config.has_zeros)

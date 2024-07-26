@@ -31,9 +31,10 @@ _import_structure = {
         "set_module_quantized_tensor_to_device",
     ],
     "tgi": [
-        "WeightOnlyQuantize",
+        "GLMQuantize",
+        "GLMMatMulBit",
         "replace_with_tgi_linear",
-        "tgi_quantize"
+        "glm_quantize"
     ],
     "deepspeed": [
         "HfDeepSpeedConfig",
