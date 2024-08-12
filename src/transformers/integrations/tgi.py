@@ -1,17 +1,14 @@
-import importlib.metadata
 import warnings
 from copy import deepcopy
 from inspect import signature
-
-from packaging import version
-
 from ..utils import is_accelerate_available, is_tgi_available, logging
 from glm_kernel import (
-    weight_only_quant_ops,
-    fused_gemm_ops
+    weight_only_quant_ops
 )
 from typing import Tuple
-
+import triton
+import triton.language as tl
+from itertools import product
 if is_tgi_available():
     import torch
     import torch.nn as nn
@@ -24,114 +21,145 @@ if is_accelerate_available():
 logger = logging.get_logger(__name__)
 
 
-def glm_quantize(weight :torch.Tensor, weight_bit_width=8, group_size=None, has_zeros=False) -> Tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
+def glm_quantize(weight :torch.Tensor) -> Tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
     # padding weight last dim to multiple of 64 and group_size
     if weight.shape[-1] % 64 != 0:
-        weight = torch.nn.functional.pad(weight, (0, 64 - weight.shape[-1] % 64))
-    if group_size is not None and weight.shape[-1] % group_size != 0:
-        weight = torch.nn.functional.pad(weight, (0, group_size - weight.shape[-1] % group_size))
-
+        weight = torch.nn.functional.pad(weight, (0, 64 - weight.shape[-1] % 64)) # (n, k)
+    weight_bit_width = 4
     quantizated_weight = weight.cpu().to(torch.float32)
-    quantizated_weight = quantizated_weight.view(weight.shape[0], -1, weight.shape[-1] if group_size is None else group_size)
+    quantizated_weight = quantizated_weight.view(weight.shape[0], -1, weight.shape[-1])
     weight_scale, weight_zero, ori_weight_zero = None, None, None
-    if not has_zeros:
-        weight_scale = quantizated_weight.abs().max(dim=-1).values / (2 ** (weight_bit_width - 1) - 1)
-        quantizated_weight = torch.round(quantizated_weight / weight_scale.unsqueeze(-1)).to(torch.int8).view(quantizated_weight.shape[0], -1).t().contiguous().cpu()
-    else:
-        weight_zero = quantizated_weight.min(dim=-1).values
-        quantizated_weight = quantizated_weight - weight_zero.unsqueeze(-1)
-        weight_scale = quantizated_weight.max(dim=-1).values / (2 ** weight_bit_width - 1)
-        quantizated_weight = torch.round(quantizated_weight / weight_scale.unsqueeze(-1) - 2 ** (weight_bit_width - 1)).to(torch.int8)
-        quantizated_weight = quantizated_weight.view(quantizated_weight.shape[0], -1).t().contiguous().cpu()
-    if weight_bit_width == 4:
-        quantizated_weight = weight_only_quant_ops.pack_int8_tensor_to_packed_int4(quantizated_weight)
+    weight_zero = quantizated_weight.min(dim=-1).values
+    quantizated_weight = quantizated_weight - weight_zero.unsqueeze(-1)
+    weight_scale = quantizated_weight.max(dim=-1).values / (2 ** weight_bit_width - 1)
+    quantizated_weight = torch.round(quantizated_weight / weight_scale.unsqueeze(-1) - 2 ** (weight_bit_width - 1)).to(torch.int8)
+    quantizated_weight = quantizated_weight.view(quantizated_weight.shape[0], -1).t().contiguous().cpu()  # (k, n)
+    quantizated_weight = weight_only_quant_ops.pack_int8_tensor_to_packed_int4(quantizated_weight) # (k, n // 2)
     quantizated_weight = torch.nn.Parameter(quantizated_weight.to(weight.device), requires_grad=False)
     weight_scale = weight_scale.to(weight.dtype).t().contiguous()
-    if group_size is None:
-        weight_scale = weight_scale.squeeze(0).contiguous()
+    weight_scale = weight_scale.squeeze(0).unsqueeze(-1).contiguous()
     weight_scale = torch.nn.Parameter(weight_scale.to(weight.device), requires_grad=False)
+    weight_zero = weight_zero.to(weight.dtype)
+    weight_zero = torch.nn.Parameter(weight_zero.to(weight.device), requires_grad=False)
 
-    if has_zeros:
-        weight_zero = weight_zero.to(weight.dtype).t().contiguous()
-        weight_zero = torch.nn.Parameter(weight_zero.to(weight.device), requires_grad=False)
-    else:
-        weight_zero = None
     torch.cuda.empty_cache()
     return quantizated_weight, weight_scale, weight_zero
+
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_N': n, 'BLOCK_SIZE_K': k}, num_stages=s, num_warps=w)
+        for (n, k, s, w) in product([64, 128, 256], [128, 256, 512], [3, 5], [4, 8])
+    ],
+    key=['K', 'N'],
+)
+@triton.jit
+def dequantize_zero_triton_kernel(output_ptr, output_row_stride, output_col_stride,
+                                  input_ptr, input_row_stride, input_col_stride,
+                                  weight_scale_ptr, weight_scale_stride,
+                                  weight_zero_ptr, weight_zero_stride,
+                                  exp_num:tl.constexpr,
+                                  K: tl.constexpr, N: tl.constexpr, ori_shape:tl.constexpr,
+                                  BLOCK_SIZE_K: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
+    k_block_idx = tl.program_id(axis=0)
+    n_block_idx = tl.program_id(axis=1)
+    offs_k = k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    offs_n = n_block_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_nw = n_block_idx * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2)
+    offs_scale = offs_n * weight_scale_stride
+    offs_zero = offs_n * weight_zero_stride
+
+    offs_output = offs_k[None, :] * output_col_stride + offs_n[:, None] * output_row_stride
+    offs_weight = offs_k[:, None] * input_row_stride + offs_nw[None, :] * input_col_stride
+
+    n_mask = offs_n[:, None] < N
+    k_mask = offs_k[None, :] < ori_shape
+    mask = n_mask & k_mask
+    weight_mask = ((offs_nw[None, :] < (N // 2) )& (offs_k[:, None] < K))
+    scale_mask = offs_scale < N
+    zero_mask = offs_zero < N
+
+    int4_weight = tl.load(input_ptr + offs_weight, mask=weight_mask).to(tl.int8)
+    row_0 = ((int4_weight << 4).to(tl.int8) >> 4).to(tl.int8)
+    row_1 = (int4_weight >> 4).to(tl.int8)
+    int8_weight = tl.join(row_0, row_1)
+    int8_weight = int8_weight.reshape(row_0.shape[0], row_1.shape[1] * 2).permute(1, 0) # (k, n) -> (n, k)
+
+    zero = tl.load(weight_zero_ptr + offs_zero, mask=zero_mask).to(tl.float16)
+    zero = tl.expand_dims(zero, axis=-1)
+    scale = tl.load(weight_scale_ptr + offs_scale, mask=scale_mask).to(tl.float16)
+    scale = tl.expand_dims(scale, axis=-1)
+    output = scale * (int8_weight + exp_num) + zero
+    tl.store(output_ptr + offs_output, output, mask=mask)
+    return
+
+# m, n, k     weight: (k, n // 2), weight_scale: (n), weight_zero: (n)
+def dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape):
+    K, Nw = weight.shape
+    N = Nw * 2
+    output = torch.empty(size=(N, ori_shape), dtype=weight_scale.dtype, device=weight.device)
+    assert weight.is_cuda and output.is_cuda
+    grid = lambda META: (
+        triton.cdiv(K, META['BLOCK_SIZE_K']),
+        triton.cdiv(N, META['BLOCK_SIZE_N'])
+    )
+
+    exp_num = 2 ** (weight_bit_width - 1)
+    dequantize_zero_triton_kernel[grid](
+        output, output.stride(0), output.stride(1),
+        weight, weight.stride(0), weight.stride(1),
+        weight_scale, weight_scale.stride(0),
+        weight_zero, weight_zero.stride(0),
+        exp_num,
+        K, N, ori_shape
+    )
+    # output = torch.nn.Parameter(output, requires_grad=False)
+    return output
 
 class GLMQuantize(torch.nn.Module):
     def __init__(
         self,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        weight_bit_width=4,
-        group_size=None
+        weight_bit_width=4
     ):
         super().__init__()
         self.weight = torch.nn.Parameter(weight)
         self.weight_scale = torch.nn.Parameter(weight, requires_grad=False)
         self.weight_zero = torch.nn.Parameter(weight, requires_grad=False)
-        self.bias = torch.nn.Parameter(bias.to(weight.device, dtype=self.weight_scale.dtype)) if bias is not None else None
+        self.bias = torch.nn.Parameter(bias.to(weight.device, dtype=self.weight_scale.dtype), requires_grad=False) if bias is not None else None
         self.weight_bit_width = weight_bit_width
         self.ori_shape = weight.shape[-1]
-        self.group_size = group_size
         return
 
     def forward(self, x: torch.Tensor):
         output = GLMMatMulBit.apply(x, self.weight, self.weight_scale, 
                                     self.weight_zero, self.weight_bit_width, 
-                                    self.ori_shape, self.group_size, self.bias)
+                                    self.ori_shape, self.bias)
         return output
 
 
 class GLMMatMulBit(torch.autograd.Function):
-    # forward is the same, but we added the fallback for pre-turing GPUs
-    # backward is mostly the same, but adds one extra clause (see "elif state.CxB is not None")
     @staticmethod
-    def dequantize(weight: torch.Tensor | torch.nn.Parameter, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size=None):
-        if weight_bit_width == 4:
-            weight = weight_only_quant_ops.unpack_int4_packed_tensor_to_int8(weight.detach().cpu())
-        weight = weight.to(weight_scale.dtype).to(weight_scale.device).t().contiguous()
-        if group_size is None:
-            weight_scale = weight_scale.unsqueeze(-1)
-        else:
-            weight = weight.view(weight.shape[0], -1, group_size)
-            weight_scale = weight_scale.t().unsqueeze(-1)
-        if weight_zero is None:
-            weight = weight_scale * weight
-        else:
-            weight = weight_scale * (weight + 2 ** (weight_bit_width - 1))  + weight_zero
-        weight = weight.contiguous().view(weight.shape[0], -1)
-        cur_shape = weight.shape[-1]
-        if cur_shape != ori_shape:
-            weight = torch.nn.functional.pad(weight, (0, ori_shape - cur_shape))
-        weight = torch.nn.Parameter(weight, requires_grad=False)
-        return weight
-    
-    @staticmethod
-    def forward(ctx, x, weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size, bias):
-        ctx.tensors = (weight, weight_scale, weight_zero, bias)
+    def forward(ctx, x, weight, weight_scale, weight_zero, weight_bit_width, ori_shape, bias):
+        ctx.save_for_backward(weight, weight_scale, weight_zero, bias)
         ctx.dtype_bias = bias.dtype if bias is not None else None
         ctx.weight_bit_width = weight_bit_width
         ctx.ori_shape = ori_shape
-        ctx.group_size = group_size
-        return torch.matmul(x, GLMMatMulBit.dequantize(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size).t())
+        return torch.matmul(x, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape))
 
     @staticmethod
     def backward(ctx, grad_output):
-        weight, weight_scale, weight_zero, bias = ctx.tensors
+        weight, weight_scale, weight_zero, bias = ctx.saved_tensors
         weight_bit_width = ctx.weight_bit_width
         ori_shape = ctx.ori_shape
-        group_size = ctx.group_size
         grad_output = grad_output
-        req_gradX, _, _, _, _, _, _, req_gradBias = ctx.needs_input_grad
+        req_gradX, _, _, _, _, _, req_gradBias = ctx.needs_input_grad
         grad_x, grad_bias = None, None
         if req_gradBias:
             grad_bias = grad_output.sum(0, dtype=bias.dtype)
         if req_gradX:
-            grad_x = torch.matmul(grad_output, GLMMatMulBit.dequantize(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size))
-        # print(f"weight: {GLMMatMulBit.dequantize(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, group_size)},\n grad_x: {grad_x}")
-        return grad_x, None, None, None, None, None, None, grad_bias
+            grad_x = torch.matmul(grad_output, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape))
+        return grad_x, None, None, None, None, None, grad_bias
 
 
 def _replace_with_tgi_linear(
@@ -170,7 +198,7 @@ def _replace_with_tgi_linear(
                             module.weight,
                             module.bias,
                             weight_bit_width = weight_bit_width,
-                            group_size=quantization_config.group_size
+                            # group_size=quantization_config.group_size
                         )
                         has_been_replaced = True
                 # Store the module class in case we need to transpose the weight later
