@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
 
 from ..utils import is_torch_available, logging
-from ..integrations import get_keys_to_not_convert, replace_with_tgi_linear, GLMQuantize, glm_quantize
+from ..integrations import get_keys_to_not_convert, replace_with_tgi_linear, GLMQuantize, glm_quantize, dequantize_triton
 
 
 if is_torch_available():
@@ -46,7 +46,7 @@ class TGIBitHfQuantizer(HfQuantizer):
     use_keep_in_fp32_modules = True
     requires_parameters_quantization = True
     requires_calibration = False
-
+    warm_up_cache = set()
     # required_packages = ["bitsandbytes", "accelerate"]
 
     def __init__(self, quantization_config, **kwargs):
@@ -118,7 +118,7 @@ class TGIBitHfQuantizer(HfQuantizer):
         for key in tmp_missing_keys:
             for ignore_missing_key in ignore_missing_keys:
                 if ignore_missing_key in key:
-                    missing_keys.remove(ignore_missing_key)
+                    missing_keys.remove(key)
         return missing_keys
 
     def check_quantized_param(
@@ -163,18 +163,29 @@ class TGIBitHfQuantizer(HfQuantizer):
             new_value = torch.nn.Parameter(new_value, requires_grad=False)
             module._parameters[tensor_name] = new_value
             return
-        weight_bit_width = 8
-        if self.quantization_config.load_in_tgi_4bit:
-            weight_bit_width = 4
-        weight, weight_scale, weight_zero = glm_quantize(param_value, weight_bit_width, 
-                                                         self.quantization_config.fp8_activation, 
-                                                         self.quantization_config.group_size, 
-                                                         self.quantization_config.has_zeros)
+        # weight_bit_width = 8
+        # if self.quantization_config.load_in_tgi_4bit:
+        #     weight_bit_width = 4
+        n, k = param_value.shape
+        weight, weight_scale, weight_zero = glm_quantize(param_value)
         module._parameters["weight"] = weight
         module._parameters["weight_scale"] = weight_scale
         module._parameters["weight_zero"] = weight_zero
         if "bias" in module._parameters:
             module._parameters["bias"] = module._parameters["bias"].to(weight_scale.dtype)
+
+        # warm_up
+        if torch.distributed.get_rank() == 0:
+            if (n, k) in self.warm_up_cache:
+                return
+            self.warm_up_cache.add((n, k))
+            weight_cuda = weight.to("cuda:0")
+            weight_scale_cuda = weight_scale.to("cuda:0")
+            weight_zero_cuda = weight_zero.to("cuda:0")
+            weight_bit_width = 4
+            dequantize_triton(weight_cuda, weight_scale_cuda, weight_zero_cuda, weight_bit_width, ori_shape=k, is_transposed=True)
+            dequantize_triton(weight_cuda, weight_scale_cuda, weight_zero_cuda, weight_bit_width, ori_shape=k, is_transposed=False)
+            torch.cuda.empty_cache()
         return
 
     # Copied from transformers.quantizers.quantizer_bnb_8bit.Bnb8BitHfQuantizer.adjust_max_memory

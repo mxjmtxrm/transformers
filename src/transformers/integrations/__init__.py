@@ -34,7 +34,8 @@ _import_structure = {
         "GLMQuantize",
         "GLMMatMulBit",
         "replace_with_tgi_linear",
-        "glm_quantize"
+        "glm_quantize",
+        "dequantize_triton"
     ],
     "deepspeed": [
         "HfDeepSpeedConfig",

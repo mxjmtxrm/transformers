@@ -218,3 +218,57 @@ class TGI4BitTest(Base4bitTest):
         model = AutoModelForSeq2SeqLM.from_pretrained("google-t5/t5-small", load_in_tgi_4bit=True)
         self.assertTrue(model.decoder.block[0].layer[2].DenseReluDense.wo.weight.dtype == torch.float32)
 
+    def test_backward(self):
+        import torch
+        from torch import nn
+        import torch.optim as optim
+        from transformers.integrations import GLMQuantize, glm_quantize
+
+        x = torch.randn(3, 128, device="cuda",dtype=torch.float16)
+        ori_weight = torch.randn(64, 128, device="cuda",dtype=torch.float16)
+
+        linear = nn.Linear(128, 64) # (input_features, output_features)
+        linear.weight = nn.Parameter(ori_weight, requires_grad=True)
+
+        linear_glm = GLMQuantize(linear.weight, linear.bias, weight_bit_width=4)
+        weight, weight_scale, weight_zero = glm_quantize(linear.weight, weight_bit_width=4)
+        linear_glm.weight = weight
+        linear_glm.weight_scale = weight_scale
+        linear_glm.weight_zero = weight_zero
+
+        linear_glm = linear_glm.to(0)
+        x.requires_grad = True
+        output = linear_glm(x)
+        loss = output.sum()
+        output.retain_grad()
+
+        loss.backward()
+        normal_output = torch.matmul(output.grad, ori_weight)
+        self.assertTrue(x.grad.shape == normal_output.shape)
+
+        print(f"ori_weight: {ori_weight}, \n x.grad: {x.grad}, \n normal_output: {normal_output}")
+
+    def test_dequantize(self):
+        def test_dequantize(in_features, out_features, group_size=None, has_zeros=False):
+            import torch
+            from torch import nn
+            import torch.optim as optim
+            from transformers.integrations import GLMQuantize, glm_quantize, GLMMatMulBit
+
+            weight = torch.randn(out_features, in_features, device="cuda",dtype=torch.float16)
+            weight_bit_width = 4
+
+            linear = nn.Linear(in_features, out_features) # (input_features, output_features)
+            linear.weight = nn.Parameter(weight, requires_grad=True)
+
+            weight, weight_scale, weight_zero, ori_weight_zero = glm_quantize(linear.weight, weight_bit_width=weight_bit_width,
+                                                            group_size=group_size, has_zeros=has_zeros)
+            weight = GLMMatMulBit.dequantize(weight, weight_scale, ori_weight_zero,
+                                            weight_bit_width, ori_shape=in_features, group_size=group_size)
+            self.assertTrue(weight.shape == linear.weight.shape, f"dequantize shape {weight.shape} not equal ori weight shape {linear.weight.shape}")
+            print(f"ori_weight: {linear.weight},\n deq_weight: {weight}")
+            print("=======================================================")
+        test_dequantize(in_features=128, out_features=68)
+        test_dequantize(in_features=129, out_features=68)
+        test_dequantize(in_features=128, out_features=68, group_size=64, has_zeros=True)
+        test_dequantize(in_features=129, out_features=68, group_size=64, has_zeros=True)

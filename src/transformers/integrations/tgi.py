@@ -9,6 +9,7 @@ from typing import Tuple
 import triton
 import triton.language as tl
 from itertools import product
+import os
 if is_tgi_available():
     import torch
     import torch.nn as nn
@@ -20,6 +21,12 @@ if is_accelerate_available():
 
 logger = logging.get_logger(__name__)
 
+import os
+if "TRITON_DEJAVU_STORAGE" not in os.environ:
+    warmup_path = "/tmp/warmup"
+    if not os.path.exists(warmup_path):
+        os.mkdir(warmup_path)
+    os.environ["TRITON_DEJAVU_STORAGE"] = "/tmp/warmup"
 
 def glm_quantize(weight :torch.Tensor) -> Tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
     # padding weight last dim to multiple of 64 and group_size
@@ -28,7 +35,7 @@ def glm_quantize(weight :torch.Tensor) -> Tuple[nn.Parameter, nn.Parameter, nn.P
     weight_bit_width = 4
     quantizated_weight = weight.cpu().to(torch.float32)
     quantizated_weight = quantizated_weight.view(weight.shape[0], -1, weight.shape[-1])
-    weight_scale, weight_zero, ori_weight_zero = None, None, None
+    weight_scale, weight_zero = None, None
     weight_zero = quantizated_weight.min(dim=-1).values
     quantizated_weight = quantizated_weight - weight_zero.unsqueeze(-1)
     weight_scale = quantizated_weight.max(dim=-1).values / (2 ** weight_bit_width - 1)
@@ -45,11 +52,15 @@ def glm_quantize(weight :torch.Tensor) -> Tuple[nn.Parameter, nn.Parameter, nn.P
     torch.cuda.empty_cache()
     return quantizated_weight, weight_scale, weight_zero
 
-@triton.autotune(
+# os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+import triton_dejavu
+# To cache tune configs
+@triton_dejavu.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_N': n, 'BLOCK_SIZE_K': k}, num_stages=s, num_warps=w)
-        for (n, k, s, w) in product([64, 128, 256], [128, 256, 512], [3, 5], [4, 8])
-    ],
+         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=8),
+         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}, num_stages=5, num_warps=4),
+         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=4),
+     ],
     key=['K', 'N'],
 )
 @triton.jit
@@ -62,21 +73,26 @@ def dequantize_zero_triton_kernel(output_ptr, output_row_stride, output_col_stri
                                   BLOCK_SIZE_K: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
     k_block_idx = tl.program_id(axis=0)
     n_block_idx = tl.program_id(axis=1)
-    offs_k = k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-    offs_n = n_block_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offs_nw = n_block_idx * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2)
+    offs_k = tl.max_contiguous(k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K), BLOCK_SIZE_K)
+    offs_n = tl.max_contiguous(n_block_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_nw = tl.max_contiguous(n_block_idx * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2), BLOCK_SIZE_N // 2)
     offs_scale = offs_n * weight_scale_stride
-    offs_zero = offs_n * weight_zero_stride
+    # offs_zero = offs_n * weight_zero_stride
 
     offs_output = offs_k[None, :] * output_col_stride + offs_n[:, None] * output_row_stride
     offs_weight = offs_k[:, None] * input_row_stride + offs_nw[None, :] * input_col_stride
-
+    # offs_zero = offs_k
+    # offs_scale = offs_k[:, None]
+    # n_mask = offs_n[None, :] < N
+    # k_mask = offs_k[:, None] < K
     n_mask = offs_n[:, None] < N
     k_mask = offs_k[None, :] < ori_shape
     mask = n_mask & k_mask
-    weight_mask = ((offs_nw[None, :] < (N // 2) )& (offs_k[:, None] < K))
+    weight_nmask = offs_nw[None, :] < (N // 2)
+    weight_kmask = offs_k[:, None] < K
+    weight_mask = weight_nmask & weight_kmask
     scale_mask = offs_scale < N
-    zero_mask = offs_zero < N
+    # zero_mask = offs_zero < N
 
     int4_weight = tl.load(input_ptr + offs_weight, mask=weight_mask).to(tl.int8)
     row_0 = ((int4_weight << 4).to(tl.int8) >> 4).to(tl.int8)
@@ -84,7 +100,7 @@ def dequantize_zero_triton_kernel(output_ptr, output_row_stride, output_col_stri
     int8_weight = tl.join(row_0, row_1)
     int8_weight = int8_weight.reshape(row_0.shape[0], row_1.shape[1] * 2).permute(1, 0) # (k, n) -> (n, k)
 
-    zero = tl.load(weight_zero_ptr + offs_zero, mask=zero_mask).to(tl.float16)
+    zero = tl.load(weight_zero_ptr + offs_scale, mask=scale_mask).to(tl.float16)
     zero = tl.expand_dims(zero, axis=-1)
     scale = tl.load(weight_scale_ptr + offs_scale, mask=scale_mask).to(tl.float16)
     scale = tl.expand_dims(scale, axis=-1)
@@ -92,27 +108,86 @@ def dequantize_zero_triton_kernel(output_ptr, output_row_stride, output_col_stri
     tl.store(output_ptr + offs_output, output, mask=mask)
     return
 
-# m, n, k     weight: (k, n // 2), weight_scale: (n), weight_zero: (n)
-def dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape):
+
+@triton_dejavu.autotune(
+    configs=[
+         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=8),
+         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}, num_stages=5, num_warps=4),
+         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=4),
+     ],
+    key=['K', 'N'],
+)
+@triton.jit
+def dequantize_zero_triton_transposed_kernel(output_ptr, output_row_stride, output_col_stride,
+                                  input_ptr, input_row_stride, input_col_stride,
+                                  weight_scale_ptr, weight_scale_stride,
+                                  weight_zero_ptr, weight_zero_stride,
+                                  exp_num:tl.constexpr,
+                                  K: tl.constexpr, N: tl.constexpr, ori_shape:tl.constexpr,
+                                  BLOCK_SIZE_K: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
+    k_block_idx = tl.program_id(axis=0)
+    n_block_idx = tl.program_id(axis=1)
+    offs_k = tl.max_contiguous(k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K), BLOCK_SIZE_K)
+    offs_n = tl.max_contiguous(n_block_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_nw = tl.max_contiguous(n_block_idx * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2), BLOCK_SIZE_N // 2)
+    offs_scale = offs_n * weight_scale_stride
+
+    offs_output = offs_k[:, None] * output_row_stride + offs_n[None, :] * output_col_stride
+    offs_weight = offs_k[:, None] * input_row_stride + offs_nw[None, :] * input_col_stride
+    n_mask = offs_n[None, :] < N
+    k_mask = offs_k[:, None] < ori_shape
+    mask = n_mask & k_mask
+    weight_nmask = offs_nw[None, :] < (N // 2)
+    weight_kmask = offs_k[:, None] < K
+    weight_mask = weight_nmask & weight_kmask
+    scale_mask = offs_scale < N
+
+    int4_weight = tl.load(input_ptr + offs_weight, mask=weight_mask).to(tl.int8)
+    row_0 = ((int4_weight << 4).to(tl.int8) >> 4).to(tl.int8)
+    row_1 = (int4_weight >> 4).to(tl.int8)
+    int8_weight = tl.join(row_0, row_1)
+    int8_weight = int8_weight.reshape(row_0.shape[0], row_1.shape[1] * 2).permute(1, 0) # (k, n) -> (n, k)
+
+    zero = tl.load(weight_zero_ptr + offs_scale, mask=scale_mask).to(tl.float16)
+    zero = tl.expand_dims(zero, axis=-1)
+    scale = tl.load(weight_scale_ptr + offs_scale, mask=scale_mask).to(tl.float16)
+    scale = tl.expand_dims(scale, axis=-1)
+    output = scale * (int8_weight + exp_num) + zero
+    output = output.permute(1, 0)
+    tl.store(output_ptr + offs_output, output, mask=mask)
+    return
+
+# m, n, k     weight: (k, n // 2), weight_scale: (n), weight_zero: (n), output: (n, k)
+def dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, is_transposed=True):
     K, Nw = weight.shape
     N = Nw * 2
-    output = torch.empty(size=(N, ori_shape), dtype=weight_scale.dtype, device=weight.device)
-    assert weight.is_cuda and output.is_cuda
     grid = lambda META: (
         triton.cdiv(K, META['BLOCK_SIZE_K']),
         triton.cdiv(N, META['BLOCK_SIZE_N'])
     )
-
     exp_num = 2 ** (weight_bit_width - 1)
-    dequantize_zero_triton_kernel[grid](
-        output, output.stride(0), output.stride(1),
-        weight, weight.stride(0), weight.stride(1),
-        weight_scale, weight_scale.stride(0),
-        weight_zero, weight_zero.stride(0),
-        exp_num,
-        K, N, ori_shape
-    )
-    # output = torch.nn.Parameter(output, requires_grad=False)
+    if is_transposed:
+        output = torch.empty(size=(N, ori_shape), dtype=weight_scale.dtype, device=weight.device)
+        assert weight.is_cuda and output.is_cuda
+        dequantize_zero_triton_kernel[grid](
+            output, output.stride(0), output.stride(1),
+            weight, weight.stride(0), weight.stride(1),
+            weight_scale, weight_scale.stride(0),
+            weight_zero, weight_zero.stride(0),
+            exp_num,
+            K, N, ori_shape
+        )
+    else:
+        output = torch.empty(size=(ori_shape, N), dtype=weight_scale.dtype, device=weight.device)
+        assert weight.is_cuda and output.is_cuda
+        dequantize_zero_triton_transposed_kernel[grid](
+            output, output.stride(0), output.stride(1),
+            weight, weight.stride(0), weight.stride(1),
+            weight_scale, weight_scale.stride(0),
+            weight_zero, weight_zero.stride(0),
+            exp_num,
+            K, N, ori_shape
+        )
     return output
 
 class GLMQuantize(torch.nn.Module):
@@ -145,7 +220,7 @@ class GLMMatMulBit(torch.autograd.Function):
         ctx.dtype_bias = bias.dtype if bias is not None else None
         ctx.weight_bit_width = weight_bit_width
         ctx.ori_shape = ori_shape
-        return torch.matmul(x, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape))
+        return torch.matmul(x, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, is_transposed=False))
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -158,7 +233,7 @@ class GLMMatMulBit(torch.autograd.Function):
         if req_gradBias:
             grad_bias = grad_output.sum(0, dtype=bias.dtype)
         if req_gradX:
-            grad_x = torch.matmul(grad_output, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape))
+            grad_x = torch.matmul(grad_output, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, is_transposed=True))
         return grad_x, None, None, None, None, None, grad_bias
 
 
