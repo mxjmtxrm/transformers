@@ -2185,15 +2185,26 @@ class Trainer:
                             "a `main_input_name` attribute to the model class you are using."
                         )
                     else:
-                        # (LS) Hotfix from https://github.com/huggingface/transformers/issues/28791
+                        # TODO(LS): Hotfix from https://github.com/huggingface/transformers/issues/28791
                         inputs_device = inputs[main_input_name].device
-                        self.state.num_input_tokens_seen += torch.sum(
-                            self.accelerator.gather(torch.tensor(
-                                # minus two newline tokens from prompt: `<|user|>\n{input}<|assistant|>\n{target}`
-                                torch.sum(~torch.isin(inputs[main_input_name], self.special_tokens.to(inputs_device))).item() - torch.count_nonzero(inputs[main_input_name] == self.tokenizer.get_prefix_tokens()[0]).item() * 2,
-                                device=self.dist_device, dtype=torch.int64
-                            ))
-                        ).item()
+                        prefix_tokens = self.tokenizer.get_prefix_tokens()
+                        if prefix_tokens and len(prefix_tokens) > 0:
+                            self.state.num_input_tokens_seen += torch.sum(
+                                self.accelerator.gather(torch.tensor(
+                                    # ignore special tokens, and minus two newline tokens from prompt: `<|user|>\n{input}<|assistant|>\n{target}`
+                                    torch.sum(~torch.isin(inputs[main_input_name], self.special_tokens.to(inputs_device))).item() - torch.count_nonzero(inputs[main_input_name] == self.tokenizer.get_prefix_tokens()[0]).item() * 2,
+                                    device=self.dist_device, dtype=torch.int64
+                                ))
+                            ).item()
+                        else:
+                            # glm4-nano model tokenizer doesn't have the prefix tokens
+                            self.state.num_input_tokens_seen += torch.sum(
+                                self.accelerator.gather(torch.tensor(
+                                    # ignore special tokens only
+                                    torch.sum(~torch.isin(inputs[main_input_name], self.special_tokens.to(inputs_device))).item(),
+                                    device=self.dist_device, dtype=torch.int64
+                                ))
+                            ).item()
                 if rng_to_sync:
                     self._load_rng_state(resume_from_checkpoint)
                     rng_to_sync = False
