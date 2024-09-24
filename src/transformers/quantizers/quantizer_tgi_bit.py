@@ -175,17 +175,17 @@ class TGIBitHfQuantizer(HfQuantizer):
             module._parameters["bias"] = module._parameters["bias"].to(weight_scale.dtype)
 
         # warm_up
-        if torch.distributed.get_rank() == 0:
-            if (n, k) in self.warm_up_cache:
-                return
-            self.warm_up_cache.add((n, k))
-            weight_cuda = weight.to("cuda:0")
-            weight_scale_cuda = weight_scale.to("cuda:0")
-            weight_zero_cuda = weight_zero.to("cuda:0")
-            weight_bit_width = 4
-            dequantize_triton(weight_cuda, weight_scale_cuda, weight_zero_cuda, weight_bit_width, ori_shape=k, is_transposed=True)
-            dequantize_triton(weight_cuda, weight_scale_cuda, weight_zero_cuda, weight_bit_width, ori_shape=k, is_transposed=False)
-            torch.cuda.empty_cache()
+        # if torch.distributed.get_rank() == 0:
+        #     if (n, k) in self.warm_up_cache:
+        #         return
+        #     self.warm_up_cache.add((n, k))
+        #     weight_cuda = weight.to("cuda:0")
+        #     weight_scale_cuda = weight_scale.to("cuda:0")
+        #     weight_zero_cuda = weight_zero.to("cuda:0")
+        #     weight_bit_width = 4
+        #     dequantize_triton(weight_cuda, weight_scale_cuda, weight_zero_cuda, weight_bit_width, ori_shape=k, is_transposed=True)
+        #     dequantize_triton(weight_cuda, weight_scale_cuda, weight_zero_cuda, weight_bit_width, ori_shape=k, is_transposed=False)
+        #     torch.cuda.empty_cache()
         return
 
     # Copied from transformers.quantizers.quantizer_bnb_8bit.Bnb8BitHfQuantizer.adjust_max_memory

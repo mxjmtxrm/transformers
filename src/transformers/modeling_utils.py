@@ -1437,7 +1437,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                     ' We recommend to just use `attn_implementation="flash_attention_2"` when loading the model.'
                 )
 
-            if config._attn_implementation not in ["eager", "sdpa", "flash_attention_2"]:
+            if config._attn_implementation not in ["eager", "sdpa", "flash_attention_2", "ulysses"]:
                 message = f'Specified `attn_implementation="{config._attn_implementation}"` is not supported. The only possible arguments are `attn_implementation="eager"` (manual attention implementation)'
                 if cls._supports_flash_attn_2:
                     message += ', `"attn_implementation=flash_attention_2"` (implementation using flash attention 2)'
@@ -1468,7 +1468,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 config,
                 hard_check_only=False if requested_attn_implementation is None else True,
             )
-        else:
+        elif config._attn_implementation != "ulysses":
             config._attn_implementation = "eager"
 
         return config
@@ -3000,7 +3000,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         adapter_kwargs = kwargs.pop("adapter_kwargs", {})
         adapter_name = kwargs.pop("adapter_name", "default")
         use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
-
         if is_fsdp_enabled():
             low_cpu_mem_usage = True
 
@@ -3583,6 +3582,24 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             config, use_flash_attention_2=use_flash_attention_2, torch_dtype=torch_dtype, device_map=device_map
         )
 
+        tensor_model_parallel_size = 1
+        sequence_parallel_size = 1
+        sequence_ring_parallel_size = 1
+        if hasattr(config, "tensor_model_parallel_size"):
+            tensor_model_parallel_size = getattr(config, "tensor_model_parallel_size")
+        if hasattr(config, "sequence_parallel_size"):
+            sequence_parallel_size = getattr(config, "sequence_parallel_size")
+        if hasattr(config, "sequence_ring_parallel_size"):
+            sequence_ring_parallel_size = getattr(config, "sequence_ring_parallel_size")
+        print(f"{tensor_model_parallel_size=}, {sequence_parallel_size=}, {getattr(config, 'sequence_ring_parallel_size')=}")
+        if tensor_model_parallel_size > 1 or \
+            sequence_parallel_size > 1:
+            from . import parallel_state as mpu
+            mpu.initialize_model_parallel(tensor_model_parallel_size=tensor_model_parallel_size,
+                                        sequence_parallel_size=sequence_parallel_size,
+                                        sequence_ring_parallel_size=sequence_ring_parallel_size)
+        if "ring_implemention" in model_kwargs:
+            model_kwargs.pop("ring_implemention")
         with ContextManagers(init_contexts):
             # Let's make sure we don't run the init function of buffer modules
             model = cls(config, *model_args, **model_kwargs)
@@ -3779,7 +3796,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 device_map_kwargs["force_hooks"] = True
             if not is_fsdp_enabled() and not is_deepspeed_zero3_enabled():
                 dispatch_model(model, **device_map_kwargs)
-
+                if torch.distributed.get_rank() == 0:
+                    print(f"after_dispatch_model cuda: {0}, mem_usage: {torch.cuda.max_memory_reserved(0)/1024/1024/1024:.2f} GiB")
+                    print(f"after_dispatch_model cuda: {0}, mem_allocated: {torch.cuda.memory_allocated(0)/1024/1024/1024:.2f} GiB")
         if hf_quantizer is not None:
             hf_quantizer.postprocess_model(model)
             model.hf_quantizer = hf_quantizer
@@ -4124,6 +4143,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             if len(resolved_archive_file) > 1:
                 resolved_archive_file = logging.tqdm(resolved_archive_file, desc="Loading checkpoint shards")
             for shard_file in resolved_archive_file:
+                if torch.distributed.get_rank() == 0:
+                    print(f"\ncuda: {0}, mem_usage: {torch.cuda.max_memory_reserved(0)/1024/1024/1024:.2f} GiB")
+                    print(f"cuda: {0}, mem_allocated: {torch.cuda.memory_allocated(0)/1024/1024/1024:.2f} GiB\n")
                 # Skip the load for shards that only contain disk-offloaded weights when using safetensors for the offload.
                 if shard_file in disk_only_shard_files:
                     continue

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 
+import transformers.parallel_state as mpu
 # Integrations must be imported before ML frameworks:
 # isort: off
 from .integrations import (
@@ -1918,7 +1919,10 @@ class Trainer:
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
-        total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
+        if mpu.sequence_parallel_is_initialized() or mpu.model_parallel_is_initialized():
+            total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * mpu.get_data_parallel_world_size()
+        else:
+            total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
 
         len_dataloader = None
         num_train_tokens = None

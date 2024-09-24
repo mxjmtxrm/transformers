@@ -171,7 +171,11 @@ class LlamaConfig(PretrainedConfig):
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
-
+        self.tensor_model_parallel_size = kwargs.get("tensor_model_parallel_size", 1)
+        self.sequence_parallel_size = kwargs.get("sequence_parallel_size", 1)
+        self.sequence_ring_parallel_size = kwargs.get("sequence_ring_parallel_size", 1)
+        if self.sequence_ring_parallel_size > 1:
+            self.ring_implemention = kwargs.pop("ring_implemention", "basic")
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

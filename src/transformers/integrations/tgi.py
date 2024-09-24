@@ -220,7 +220,10 @@ class GLMMatMulBit(torch.autograd.Function):
         ctx.dtype_bias = bias.dtype if bias is not None else None
         ctx.weight_bit_width = weight_bit_width
         ctx.ori_shape = ori_shape
-        return torch.matmul(x, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, is_transposed=False))
+        if bias is not None:
+            return torch.matmul(x, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, is_transposed=False)) + bias
+        else:
+            return torch.matmul(x, dequantize_triton(weight, weight_scale, weight_zero, weight_bit_width, ori_shape, is_transposed=False))
 
     @staticmethod
     def backward(ctx, grad_output):
