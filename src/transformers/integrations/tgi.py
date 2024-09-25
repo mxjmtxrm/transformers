@@ -2,17 +2,17 @@ import warnings
 from copy import deepcopy
 from inspect import signature
 from ..utils import is_accelerate_available, is_tgi_available, logging
-from glm_kernel import (
-    weight_only_quant_ops
-)
-from typing import Tuple
-import triton
-import triton.language as tl
 from itertools import product
+from typing import Tuple
 import os
 if is_tgi_available():
     import torch
     import torch.nn as nn
+    import triton
+    import triton.language as tl
+    from glm_kernel import (
+        weight_only_quant_ops
+    )
 
 
 if is_accelerate_available():
