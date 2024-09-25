@@ -53,7 +53,8 @@ def glm_quantize(weight :torch.Tensor) -> Tuple[nn.Parameter, nn.Parameter, nn.P
     return quantizated_weight, weight_scale, weight_zero
 
 # os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
-import triton_dejavu
+if is_tgi_available():
+    import triton_dejavu
 # To cache tune configs
 @triton_dejavu.autotune(
     configs=[
