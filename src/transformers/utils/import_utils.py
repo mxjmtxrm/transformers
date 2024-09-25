@@ -742,7 +742,7 @@ def is_torch_xpu_available(check_device=False):
 
 @lru_cache
 def is_tgi_available() -> bool:
-    return importlib.util.find_spec("glm_kernel") is not None
+    return (importlib.util.find_spec("glm_kernel") is not None) and (importlib.util.find_spec("triton") is not None)
 
 def is_bitsandbytes_available():
     if not is_torch_available():

@@ -718,7 +718,7 @@ class LlamaUlyssesAttention(LlamaAttention):
             raise Exception("MPU is not initialized.")
         self.seq_rank = mpu.get_sequence_parallel_rank()
         self.print_mem = getattr(config, "print_mem", False)
-        self.use_ring = config.sequence_ring_parallel_size >= 1
+        self.use_ring = config.sequence_ring_parallel_size > 1
         if self.use_ring:
             self.ring_impelmention = getattr(config, "ring_implemention", "basic")
         self.dist_attn = UlyssesAttention()
