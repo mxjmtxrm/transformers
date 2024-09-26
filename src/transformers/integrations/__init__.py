@@ -30,13 +30,13 @@ _import_structure = {
         "set_module_8bit_tensor_to_device",
         "set_module_quantized_tensor_to_device",
     ],
-    "tgi": [
-        "GLMQuantize",
-        "GLMMatMulBit",
-        "replace_with_tgi_linear",
-        "glm_quantize",
-        "dequantize_triton"
-    ],
+    # "tgi": [
+    #     "GLMQuantize",
+    #     "GLMMatMulBit",
+    #     "replace_with_tgi_linear",
+    #     "glm_quantize",
+    #     "dequantize_triton"
+    # ],
     "deepspeed": [
         "HfDeepSpeedConfig",
         "HfTrainerDeepSpeedConfig",
