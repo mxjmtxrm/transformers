@@ -949,13 +949,14 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
                 full_attention_mask = self.get_masks(input_ids, past_key_values, padding_mask=attention_mask)
 
         # Rotary positional embeddings
-        if mpu.sequence_parallel_is_initialized():
+        if mpu.sequence_parallel_is_initialized() and position_ids is None:
             seq_rank = mpu.get_sequence_parallel_rank()
             seq_parallel_size = mpu.get_sequence_parallel_world_size()
             partial_seq_len = seq_length // seq_parallel_size
             start = seq_rank * partial_seq_len
             end = min(seq_rank * partial_seq_len + partial_seq_len, seq_length)
             rotary_pos_emb = self.rotary_pos_emb(start=start, max_seq_len=end)
+            rotary_pos_emb = rotary_pos_emb[None, :end]
         else:
             rotary_pos_emb = self.rotary_pos_emb(start=0, max_seq_len=self.seq_length)
             if position_ids is not None:
