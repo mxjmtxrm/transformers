@@ -11,7 +11,6 @@ from flash_attn import flash_attn_func
 from .all_to_all import SeqAllToAll4D, SeqAllToAllAsync4D
 import torch.nn.functional as F
 from transformers import parallel_state as mpu
-from .stream_pool import CudaStreamPool
 
 
 class UlyssesAttention(torch.nn.Module):
