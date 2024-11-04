@@ -640,6 +640,13 @@ def get_sequence_data_parallel_rank():
         return _SEQUENCE_DATA_PARALLEL_RANK
     return torch.distributed.get_rank(group=get_sequence_data_parallel_group())
 
+def get_sequence_ring_parallel_rank():
+    """Return my rank for the sequence data parallel group."""
+    global _SEQUENCE_RING_PARALLEL_RANK
+    if _SEQUENCE_RING_PARALLEL_RANK is not None:
+        return _SEQUENCE_RING_PARALLEL_RANK
+    return torch.distributed.get_rank(group=get_sequence_ring_parallel_group())
+
 
 def is_pipeline_first_stage(ignore_virtual=False):
     """Return True if in the first pipeline model-parallel stage, False otherwise."""

@@ -330,12 +330,6 @@ class FlashAttention2(CoreAttention):
         dropout = self.config.attention_dropout if self.training else 0.0
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-                query_states, key_states, value_states, attention_mask, query_length
-            )
-
-            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-            max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
             if self.use_ring:
                 attn_output_unpad = RING_IMPL_VAR_LEN_DICT[self.ring_impelmention](
                     query_states,
@@ -348,6 +342,12 @@ class FlashAttention2(CoreAttention):
                     causal=causal,
                     group=mpu.get_sequence_ring_parallel_group())
             else:
+                query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
+                    query_states, key_states, value_states, attention_mask, query_length
+                )
+
+                cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+                max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
                 attn_output_unpad = flash_attn_varlen_func(
                     query_states,
                     key_states,
@@ -361,7 +361,7 @@ class FlashAttention2(CoreAttention):
                     causal=causal,
                 )
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+                attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
         else:
             if self.use_ring:
                 attn_output = RING_IMPL_DICT[self.ring_impelmention](query_states, key_states, value_states, dropout_p=dropout, softmax_scale=None, causal=causal, group=mpu.get_sequence_ring_parallel_group())
@@ -932,14 +932,39 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # (b, s)
         batch_size, seq_length = input_ids.shape
         if mpu.sequence_parallel_is_initialized():
             seq_rank = mpu.get_sequence_parallel_rank()
-            # (batch_size, seq_len)
-            if input_ids is not None:
-                input_ids = torch.chunk(input_ids, mpu.get_sequence_parallel_world_size(), dim=1)[seq_rank]
-            if position_ids is not None:
-                position_ids = torch.chunk(position_ids, mpu.get_sequence_parallel_world_size(), dim=1)[seq_rank]
+            sp_ring_size = mpu.get_sequence_ring_parallel_world_size()
+            if sp_ring_size > 1 and (attention_mask is not None and 0 in attention_mask):
+                indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+                pad_size = 0
+                if input_ids is not None:
+                    input_ids = input_ids.reshape(batch_size * seq_length).index_select(0, indices).unsqueeze(0)
+                    sp_size = mpu.get_sequence_parallel_world_size()
+                    # (b, s) -> (1, b * s // sp_size)
+                    input_ids_split = torch.chunk(input_ids, sp_size, dim=1)
+                    input_ids = input_ids_split[seq_rank]
+                    if (batch_size * seq_length) % sp_size != 0:
+                        pad_size = input_ids_split[-1] - input_ids_split[0]
+                        mpu.set_sequence_ring_parallel_world_size(pad_size)
+                        if seq_rank == sp_size:
+                            input_ids = torch.nn.functional.pad(input_ids, (1, pad_size))
+                    print(f"{seq_rank=}, {input_ids.shape=}")
+                if position_ids is not None:
+                    position_ids = position_ids.reshape(batch_size * seq_length).index_select(0, indices).unsqueeze(0)
+                    position_ids = torch.chunk(position_ids, mpu.get_sequence_parallel_world_size(), dim=1)[seq_rank]
+                    if pad_size != 0:
+                        if seq_rank == sp_size:
+                            position_ids = torch.nn.functional.pad(position_ids, (1, pad_size))
+                    print(f"{seq_rank=}, {position_ids.shape=}")
+            else:
+                # (batch_size, seq_len)
+                if input_ids is not None:
+                    input_ids = torch.chunk(input_ids, mpu.get_sequence_parallel_world_size(), dim=1)[seq_rank]
+                if position_ids is not None:
+                    position_ids = torch.chunk(position_ids, mpu.get_sequence_parallel_world_size(), dim=1)[seq_rank]
 
         if inputs_embeds is None:
             inputs_embeds = self.embedding(input_ids)
