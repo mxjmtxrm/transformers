@@ -721,8 +721,11 @@ class LlamaDecoderLayer(nn.Module):
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.attention_sandwich_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.mlp_sandwich_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.sandwich_norm = False
+        if config.sandwich_norm:
+            self.sandwich_norm = True
+            self.attention_sandwich_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.mlp_sandwich_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -769,14 +772,16 @@ class LlamaDecoderLayer(nn.Module):
             cache_position=cache_position,
             **kwargs,
         )
-        hidden_states = self.attention_sandwich_layernorm(hidden_states)
+        if self.sandwich_norm:
+            hidden_states = self.attention_sandwich_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.mlp_sandwich_layernorm(hidden_states)
+        if self.sandwich_norm:
+            hidden_states = self.mlp_sandwich_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
